@@ -1,0 +1,13 @@
+{
+    "files.associations": {
+        ".fantomasignore": "ignore",
+        "chrono": "cpp",
+        "format": "cpp",
+        "forward_list": "cpp",
+        "initializer_list": "cpp",
+        "vector": "cpp",
+        "xiosbase": "cpp",
+        "xstring": "cpp",
+        "xutility": "cpp"
+    }
+}
