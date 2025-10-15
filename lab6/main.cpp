@@ -1,6 +1,7 @@
 #include <iostream>
 #include <vector>
-#include <limits>
+#include <string>
+
 
 int main() {
     std::ios::sync_with_stdio(false);
@@ -35,7 +36,7 @@ int main() {
     std::string result;
     result.reserve(n * 3);
     int cur = n;
-    
+
     while (cur > 1) {
         if (op[cur] == 0) {
             result += "-1 ";
