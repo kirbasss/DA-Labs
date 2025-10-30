@@ -4,6 +4,8 @@
 #include <sstream>
 #include <stdexcept>
 #include <cctype>
+#include <algorithm>
+#include <limits>
 
 struct Token {
     int offset;
@@ -12,128 +14,246 @@ struct Token {
     bool has_char;
 };
 
-std::vector<Token> lz77_compress(const std::string &s) {
-    std::vector<Token> result;
-    int n = static_cast<int>(s.size());
+std::vector<int> build_sa(const std::string &s) {
+    std::string str = s + "$";
+    int n = (int)str.size();
+    std::vector<int> p(n), c(n);
+
+    // sort by single character
+    {
+        std::vector<std::pair<char,int>> a(n);
+        for (int i = 0; i < n; ++i) a[i] = {str[i], i};
+        std::sort(a.begin(), a.end());
+        for (int i = 0; i < n; ++i) p[i] = a[i].second;
+        c[p[0]] = 0;
+        for (int i = 1; i < n; ++i) {
+            c[p[i]] = c[p[i-1]] + (a[i].first != a[i-1].first);
+        }
+    }
+
+    int k = 0;
+    std::vector<int> pn(n), cn(n);
+    while ((1 << k) < n) {
+        int len = 1 << k;
+        for (int i = 0; i < n; ++i)
+            pn[i] = (p[i] - len + n) % n;
+
+        // counting sort
+        std::vector<int> cnt(n, 0);
+        for (int x : c) cnt[x]++;
+        std::vector<int> pos(n);
+        pos[0] = 0;
+        for (int i = 1; i < n; ++i) pos[i] = pos[i-1] + cnt[i-1];
+        for (int x : pn) {
+            int cl = c[x];
+            p[pos[cl]++] = x;
+        }
+
+        // recalc classes
+        cn[p[0]] = 0;
+        for (int i = 1; i < n; ++i) {
+            std::pair<int,int> prev = {c[p[i-1]], c[(p[i-1] + len) % n]};
+            std::pair<int,int> now  = {c[p[i]],   c[(p[i]   + len) % n]};
+            cn[p[i]] = cn[p[i-1]] + (now != prev);
+        }
+        c.swap(cn);
+        ++k;
+    }
+
+    return p;
+}
+
+// Kasai
+std::vector<int> build_lcp(const std::string &s, const std::vector<int> &sa) {
+    int n = (int)sa.size();
+    std::vector<int> rank(n);
+    for (int i = 0; i < n; ++i) rank[sa[i]] = i;
+    std::vector<int> lcp(n, 0);
+    int h = 0;
+    for (int i = 0; i < n; ++i) {
+        int r = rank[i];
+        if (r == 0) { h = 0; lcp[r] = 0; continue; }
+        int j = sa[r - 1];
+        while (i + h < n && j + h < n && s[i + h] == s[j + h]) ++h;
+        lcp[r] = h;
+        if (h > 0) --h;
+    }
+    return lcp;
+}
+
+std::vector<Token> lz77_compress_sa(const std::string &s) {
+    std::vector<Token> res;
+    int n = (int)s.size();
+    if (n == 0) return res;
+
+    std::vector<int> sa = build_sa(s);
+    std::string str = s + "$";
+    std::vector<int> lcp = build_lcp(str, sa);
+    int N = (int)sa.size(); // == n + 1
+    std::vector<int> rank(N);
+    for (int i = 0; i < N; ++i) rank[sa[i]] = i;
+
     int pos = 0;
-
     while (pos < n) {
+        int r = rank[pos];
         int best_len = 0;
-        int best_offset = 0;
+        int best_start = 0;
 
-        for (int start = 0; start < pos; ++start) {
-            int len = 0;
-            while (pos + len < n && start + len < pos && s[start + len] == s[pos + len]) {
-                ++len;
+        // go left from r-1 down to 0
+        int minL = std::numeric_limits<int>::max();
+        for (int i = r - 1; i >= 0; --i) {
+            int idx = i + 1; // lcp[i+1] is LCP(sa[i], sa[i+1])
+            // cap by remaining length (n - pos) to avoid including '$'
+            minL = std::min(minL, std::min(lcp[idx], n - pos));
+            if (minL <= best_len) break; // can't improve going further left
+            int j = sa[i];
+            if (j < pos) {
+                if (minL > best_len || (minL == best_len && (pos - j) < (pos - best_start))) {
+                    best_len = minL;
+                    best_start = j;
+                }
             }
-            if (len > best_len || (len == best_len && len > 0 && pos - start < best_offset)) {
-                best_len = len;
-                best_offset = pos - start;
+        }
+
+        // go right from r+1 to N-1
+        minL = std::numeric_limits<int>::max();
+        for (int i = r + 1; i < N; ++i) {
+            int idx = i; // lcp[i] is LCP(sa[i], sa[i-1])
+            minL = std::min(minL, std::min(lcp[idx], n - pos));
+            if (minL <= best_len) break; // can't improve going further right
+            int j = sa[i];
+            if (j < pos) {
+                if (minL > best_len || (minL == best_len && (pos - j) < (pos - best_start))) {
+                    best_len = minL;
+                    best_start = j;
+                }
             }
         }
 
         if (best_len == 0) {
-            result.push_back({0, 0, s[pos], true});
+            // literal
+            res.push_back({0, 0, s[pos], true});
             pos += 1;
         } else {
+            int offset = pos - best_start;
             if (pos + best_len < n) {
-                result.push_back({best_offset, best_len, s[pos + best_len], true});
+                res.push_back({offset, best_len, s[pos + best_len], true});
                 pos += best_len + 1;
             } else {
-                result.push_back({best_offset, best_len, '\0', false});
+                res.push_back({offset, best_len, '\0', false});
                 pos += best_len;
             }
         }
     }
 
-    return result;
+    return res;
 }
 
 std::string lz77_decompress(const std::vector<Token> &tokens) {
-    std::string result;
-
+    std::string out;
     for (const Token &t : tokens) {
         if (t.offset == 0 && t.length == 0) {
-            if (t.has_char) result.push_back(t.ch);
+            if (t.has_char) out.push_back(t.ch);
         } else {
-            int start = static_cast<int>(result.size()) - t.offset;
-            if (start < 0)
-                throw std::runtime_error("Некорректный offset");
-
-            for (int i = 0; i < t.length; ++i)
-                result.push_back(result[start + i]);
-
-            if (t.has_char)
-                result.push_back(t.ch);
+            int start = (int)out.size() - t.offset;
+            if (start < 0) throw std::runtime_error("Invalid token offset");
+            for (int k = 0; k < t.length; ++k) out.push_back(out[start + k]);
+            if (t.has_char) out.push_back(t.ch);
         }
     }
-
-    return result;
+    return out;
 }
 
 void trim(std::string &s) {
-    size_t start = 0;
-    while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start]))) ++start;
-    size_t end = s.size();
-    while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
-    s = s.substr(start, end - start);
+    size_t a = 0; while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
+    size_t b = s.size(); while (b > a && std::isspace(static_cast<unsigned char>(s[b-1]))) --b;
+    s = s.substr(a, b-a);
+}
+
+std::vector<Token> parse_tokens_from_stdin_lines() {
+    std::vector<Token> tokens;
+    while (true) {
+        int off, len;
+        if (!(std::cin >> off)) break;
+        if (!(std::cin >> len)) break;
+
+        int sep = std::cin.get(); // возвращает int, может быть '\n' или ' ' или EOF
+        if (sep == EOF) {
+            tokens.push_back({off, len, '\0', false});
+            break;
+        }
+
+        if (sep == '\n') {
+            tokens.push_back({off, len, '\0', false});
+            continue;
+        }
+
+        int next = std::cin.peek();
+        if (next == EOF || next == '\n') {
+            if (next == '\n') std::cin.get();
+            tokens.push_back({off, len, '\0', false});
+            continue;
+        }
+
+        char ch = static_cast<char>(std::cin.get());
+
+        int c;
+        while ((c = std::cin.get()) != EOF && c != '\n') {}
+
+        tokens.push_back({off, len, ch, true});
+    }
+    return tokens;
 }
 
 int main() {
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
-    std::string command;
-    if (!std::getline(std::cin, command))
+    std::string cmd;
+    if (!std::getline(std::cin, cmd)) return 0;
+    trim(cmd);
+
+    // debug helper: if first line is "debug", run small self-checks (use locally)
+    if (cmd == "debug") {
+        // quick self-test: random / fixed strings to validate compress->decompress roundtrip
+        std::vector<std::string> tests = {
+            "abracadabra",
+            "aaaaaaa",
+            "ababa",
+            "abcabcabcabc",
+            "abracadabra abracadabra",
+            ""
+        };
+        for (auto &t : tests) {
+            auto tokens = lz77_compress_sa(t);
+            std::string back = lz77_decompress(tokens);
+            if (back != t) {
+                std::cerr << "Mismatch for: \"" << t << "\"\n";
+                std::cerr << "Decompressed: \"" << back << "\"\n";
+                std::cerr << "Tokens:\n";
+                for (auto &tk : tokens) {
+                    if (tk.has_char) std::cerr << tk.offset << ' ' << tk.length << ' ' << tk.ch << '\n';
+                    else std::cerr << tk.offset << ' ' << tk.length << '\n';
+                }
+                return 1;
+            }
+        }
+        std::cerr << "Self-tests passed\n";
         return 0;
+    }
 
-    trim(command);
-
-    if (command == "compress") {
+    if (cmd == "compress") {
         std::string text;
         if (!std::getline(std::cin, text)) text = "";
         trim(text);
-
-        std::vector<Token> tokens = lz77_compress(text);
-
+        auto tokens = lz77_compress_sa(text);
         for (const Token &t : tokens) {
-            if (t.has_char)
-                std::cout << t.offset << ' ' << t.length << ' ' << t.ch << '\n';
-            else
-                std::cout << t.offset << ' ' << t.length << '\n';
+            if (t.has_char) std::cout << t.offset << ' ' << t.length << ' ' << t.ch << '\n';
+            else std::cout << t.offset << ' ' << t.length << '\n';
         }
-    } else if (command == "decompress") {
-        std::vector<Token> tokens;
-        std::string line;
-
-        while (std::getline(std::cin, line)) {
-            trim(line);
-            if (line.empty()) continue;
-
-            std::stringstream ss(line);
-            Token t;
-            if (!(ss >> t.offset >> t.length))
-                continue;
-
-            std::string rest;
-            if (ss >> rest) {
-                t.ch = rest[0];
-                t.has_char = true;
-            } else {
-                t.ch = '\0';
-                t.has_char = false;
-            }
-
-            tokens.push_back(t);
-        }
-
-        try {
-            std::string result = lz77_decompress(tokens);
-            std::cout << result << '\n';
-        } catch (const std::exception &e) {
-            std::cerr << "Ошибка при разжатии: " << e.what() << '\n';
-            return 1;
-        }
+    } else if (cmd == "decompress") {
+        auto tokens = parse_tokens_from_stdin_lines();
+        std::cout << lz77_decompress(tokens) << '\n';
     }
 
     return 0;
