@@ -1,209 +1,217 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <sstream>
-#include <stdexcept>
-#include <cctype>
+#include <unordered_map>
+#include <set>
 #include <algorithm>
-#include <limits>
+#include <memory>
 
-struct Token {
-    int offset;
-    int length;
-    char ch;
-    bool has_char;
+struct Node {
+    std::unordered_map<char,int> next; // char -> node index
+    int start;
+    int *end;      // inclusive
+    int link;      // suffix link
+    int example_s1; // example index from s1 in subtree (or -1)
+    int example_s2; // example index from s2 in subtree (or -1)
+    Node(int s = -1, int *e = nullptr)
+        : start(s), end(e), link(-1), example_s1(-1), example_s2(-1) {}
 };
 
-std::vector<int> build_sa(const std::string &s) {
-    std::string str = s + "$";
-    int n = (int)str.size();
-    std::vector<int> p(n), c(n);
+class SuffixTree {
+private:
+    std::string text;
+    std::vector<Node> nodes;
+    int root;
 
-    // sort by single character
-    {
-        std::vector<std::pair<char,int>> a(n);
-        for (int i = 0; i < n; ++i) a[i] = {str[i], i};
-        std::sort(a.begin(), a.end());
-        for (int i = 0; i < n; ++i) p[i] = a[i].second;
-        c[p[0]] = 0;
-        for (int i = 1; i < n; ++i) {
-            c[p[i]] = c[p[i-1]] + (a[i].first != a[i-1].first);
-        }
+    int active_node;
+    int active_edge;
+    int active_length;
+
+    int remaining;
+    int *leaf_end;
+    int pos;
+    int last_new_node;
+
+    std::vector<int*> allocated_ends; // to delete later
+
+    inline int edgeLen(int idx) const {
+        return *(nodes[idx].end) - nodes[idx].start + 1;
     }
 
-    int k = 0;
-    std::vector<int> pn(n), cn(n);
-    while ((1 << k) < n) {
-        int len = 1 << k;
-        for (int i = 0; i < n; ++i)
-            pn[i] = (p[i] - len + n) % n;
-
-        // counting sort
-        std::vector<int> cnt(n, 0);
-        for (int x : c) cnt[x]++;
-        std::vector<int> pos(n);
-        pos[0] = 0;
-        for (int i = 1; i < n; ++i) pos[i] = pos[i-1] + cnt[i-1];
-        for (int x : pn) {
-            int cl = c[x];
-            p[pos[cl]++] = x;
-        }
-
-        // recalc classes
-        cn[p[0]] = 0;
-        for (int i = 1; i < n; ++i) {
-            std::pair<int,int> prev = {c[p[i-1]], c[(p[i-1] + len) % n]};
-            std::pair<int,int> now  = {c[p[i]],   c[(p[i]   + len) % n]};
-            cn[p[i]] = cn[p[i-1]] + (now != prev);
-        }
-        c.swap(cn);
-        ++k;
+    int newNode(int start, int *endPtr) {
+        nodes.emplace_back(start, endPtr);
+        nodes.back().link = -1;
+        // record endPtr only if it's not the shared leaf_end (to avoid duplicates)
+        if (endPtr != nullptr && endPtr != leaf_end) allocated_ends.push_back(endPtr);
+        return (int)nodes.size() - 1;
     }
 
-    return p;
-}
-
-// Kasai
-std::vector<int> build_lcp(const std::string &s, const std::vector<int> &sa) {
-    int n = (int)sa.size();
-    std::vector<int> rank(n);
-    for (int i = 0; i < n; ++i) rank[sa[i]] = i;
-    std::vector<int> lcp(n, 0);
-    int h = 0;
-    for (int i = 0; i < n; ++i) {
-        int r = rank[i];
-        if (r == 0) { h = 0; lcp[r] = 0; continue; }
-        int j = sa[r - 1];
-        while (i + h < n && j + h < n && s[i + h] == s[j + h]) ++h;
-        lcp[r] = h;
-        if (h > 0) --h;
+    bool walkDown(int next) {
+        int elen = edgeLen(next);
+        if (active_length >= elen) {
+            active_edge += elen;
+            active_length -= elen;
+            active_node = next;
+            return true;
+        }
+        return false;
     }
-    return lcp;
-}
 
-std::vector<Token> lz77_compress_sa(const std::string &s) {
-    std::vector<Token> res;
-    int n = (int)s.size();
-    if (n == 0) return res;
+    void extend(int idx) {
+        pos = idx;
+        *leaf_end = pos;
+        remaining++;
+        last_new_node = -1;
 
-    std::vector<int> sa = build_sa(s);
-    std::vector<int> lcp = build_lcp(s, sa);
-    std::vector<int> rank(n);
-    for (int i = 0; i < n; ++i) rank[sa[i]] = i;
-
-    int pos = 0;
-    while (pos < n) {
-        int r = rank[pos];
-        int best_len = 0;
-        int best_start = 0;
-
-        // go left from r-1 down to 0
-        int minL = std::numeric_limits<int>::max();
-        for (int i = r - 1; i >= 0; --i) {
-            int idx = i + 1; // lcp[i+1] is LCP(sa[i], sa[i+1])
-            minL = std::min(minL, lcp[idx]);
-            if (minL <= best_len) break; // can't improve going further left
-            int j = sa[i];
-            if (j < pos) {
-                if (minL > best_len || (minL == best_len && (pos - j) < (pos - best_start))) {
-                    best_len = minL;
-                    best_start = j;
+        while (remaining > 0) {
+            if (active_length == 0) active_edge = pos;
+            char a = text[active_edge];
+            auto it = nodes[active_node].next.find(a);
+            if (it == nodes[active_node].next.end()) {
+                int leaf = newNode(pos, leaf_end);
+                nodes[active_node].next[a] = leaf;
+                if (last_new_node != -1) {
+                    nodes[last_new_node].link = active_node;
+                    last_new_node = -1;
                 }
-            }
-        }
-
-        // go right from r+1 to n-1
-        minL = std::numeric_limits<int>::max();
-        for (int i = r + 1; i < n; ++i) {
-            int idx = i; // lcp[i] is LCP(sa[i], sa[i-1])
-            minL = std::min(minL, lcp[idx]);
-            if (minL <= best_len) break; // can't improve going further right
-            int j = sa[i];
-            if (j < pos) {
-                if (minL > best_len || (minL == best_len && (pos - j) < (pos - best_start))) {
-                    best_len = minL;
-                    best_start = j;
-                }
-            }
-        }
-
-        if (best_len == 0) {
-            // literal
-            res.push_back({0, 0, s[pos], true});
-            pos += 1;
-        } else {
-            int offset = pos - best_start;
-            if (pos + best_len < n) {
-                res.push_back({offset, best_len, s[pos + best_len], true});
-                pos += best_len + 1;
             } else {
-                res.push_back({offset, best_len, '\0', false});
-                pos += best_len;
+                int next = it->second;
+                if (walkDown(next)) continue;
+                char cur = text[nodes[next].start + active_length];
+                if (cur == text[pos]) {
+                    active_length++;
+                    if (last_new_node != -1) {
+                        nodes[last_new_node].link = active_node;
+                        last_new_node = -1;
+                    }
+                    break;
+                }
+                int *split_end = new int(nodes[next].start + active_length - 1);
+                int split = newNode(nodes[next].start, split_end);
+                nodes[active_node].next[a] = split;
+                int leaf = newNode(pos, leaf_end);
+                nodes[split].next[text[pos]] = leaf;
+                nodes[split].next[cur] = next;
+                nodes[next].start += active_length;
+                if (last_new_node != -1) nodes[last_new_node].link = split;
+                last_new_node = split;
+            }
+
+            remaining--;
+            if (active_node == root && active_length > 0) {
+                active_length--;
+                active_edge = pos - remaining + 1;
+            } else if (nodes[active_node].link != -1) {
+                active_node = nodes[active_node].link;
+            } else {
+                active_node = root;
             }
         }
     }
 
-    return res;
-}
+    void setSuffixIndicesAndExamples(int v, int labelHeight, int pos_dollar, int pos_hash) {
+        if (nodes[v].next.empty()) {
+            int suffixIndex = (int)text.size() - labelHeight;
+            if (suffixIndex >= 0 && suffixIndex < pos_dollar) {
+                nodes[v].example_s1 = suffixIndex;
+            } else if (suffixIndex > pos_dollar && suffixIndex < pos_hash) {
+                nodes[v].example_s2 = suffixIndex;
+            }
+            return;
+        }
 
-std::string lz77_decompress(const std::vector<Token> &tokens) {
-    std::string out;
-    for (const Token &t : tokens) {
-        if (t.offset == 0 && t.length == 0) {
-            if (t.has_char) out.push_back(t.ch);
-        } else {
-            int start = (int)out.size() - t.offset;
-            if (start < 0) throw std::runtime_error("Invalid token offset");
-            for (int k = 0; k < t.length; ++k) out.push_back(out[start + k]);
-            if (t.has_char) out.push_back(t.ch);
+        for (auto &kv : nodes[v].next) {
+            int to = kv.second;
+            setSuffixIndicesAndExamples(to, labelHeight + edgeLen(to), pos_dollar, pos_hash);
+            if (nodes[v].example_s1 == -1 && nodes[to].example_s1 != -1) nodes[v].example_s1 = nodes[to].example_s1;
+            if (nodes[v].example_s2 == -1 && nodes[to].example_s2 != -1) nodes[v].example_s2 = nodes[to].example_s2;
         }
     }
-    return out;
-}
 
-void trim(std::string &s) {
-    size_t a = 0; while (a < s.size() && std::isspace(static_cast<unsigned char>(s[a]))) ++a;
-    size_t b = s.size(); while (b > a && std::isspace(static_cast<unsigned char>(s[b-1]))) --b;
-    s = s.substr(a, b-a);
-}
-
-std::vector<Token> parse_tokens_from_stdin_lines() {
-    std::vector<Token> tokens;
-    std::string line;
-    while (std::getline(std::cin, line)) {
-        trim(line);
-        if (line.empty()) continue;
-        std::stringstream ss(line);
-        int off, len;
-        if (!(ss >> off >> len)) continue;
-        std::string rest;
-        if (ss >> rest) tokens.push_back({off, len, rest[0], true});
-        else tokens.push_back({off, len, '\0', false});
+    void findMaxLen(int v, int curDepth, int &max_len) {
+        if (nodes[v].example_s1 != -1 && nodes[v].example_s2 != -1) {
+            if (curDepth > max_len) max_len = curDepth;
+        }
+        for (auto &kv : nodes[v].next) {
+            int to = kv.second;
+            findMaxLen(to, curDepth + edgeLen(to), max_len);
+        }
     }
-    return tokens;
-}
+
+    void collectStrings(int v, int curDepth, int max_len, std::set<std::string> &res) {
+        if (nodes[v].example_s1 != -1 && nodes[v].example_s2 != -1 && curDepth == max_len) {
+            if (max_len > 0) {
+                int start_pos = nodes[v].example_s1;
+                if (start_pos >= 0 && start_pos + max_len <= (int)text.size()) {
+                    std::string cand = text.substr(start_pos, max_len);
+                    if (cand.find('$') == std::string::npos && cand.find('#') == std::string::npos) {
+                        res.insert(cand);
+                    }
+                }
+            }
+        }
+        for (auto &kv : nodes[v].next) {
+            int to = kv.second;
+            collectStrings(to, curDepth + edgeLen(to), max_len, res);
+        }
+    }
+
+public:
+    SuffixTree(): root(-1), active_node(0), active_edge(0), active_length(0),
+                  remaining(0), leaf_end(nullptr), pos(-1), last_new_node(-1) {}
+
+    void build(const std::string &s) {
+        text = s;
+        nodes.clear();
+        allocated_ends.clear();
+        leaf_end = new int(-1);
+        nodes.reserve((int)text.size() * 2 + 5);
+        root = newNode(-1, new int(-1));
+        nodes[root].link = -1;
+        active_node = root;
+        active_edge = 0;
+        active_length = 0;
+        remaining = 0;
+        last_new_node = -1;
+
+        for (size_t i = 0; i < text.size(); ++i) extend((int)i);
+    }
+
+    std::pair<int, std::vector<std::string>> findLCSForTwoStrings(int pos_dollar, int pos_hash) {
+        setSuffixIndicesAndExamples(root, 0, pos_dollar, pos_hash);
+        int max_len = 0;
+        findMaxLen(root, 0, max_len);
+        std::set<std::string> res;
+        if (max_len > 0) {
+            collectStrings(root, 0, max_len, res);
+        }
+        std::vector<std::string> out(res.begin(), res.end());
+        return {max_len, out};
+    }
+
+    ~SuffixTree() {
+        if (leaf_end) delete leaf_end;
+        for (int *p : allocated_ends) delete p;
+        allocated_ends.clear();
+    }
+};
 
 int main() {
     std::ios::sync_with_stdio(false);
     std::cin.tie(nullptr);
 
-    std::string cmd;
-    if (!std::getline(std::cin, cmd)) return 0;
-    trim(cmd);
+    std::string s1, s2;
+    if (!(std::cin >> s1 >> s2)) return 0;
 
-    if (cmd == "compress") {
-        std::string text;
-        if (!std::getline(std::cin, text)) text = "";
-        trim(text);
-        auto tokens = lz77_compress_sa(text);
-        for (const Token &t : tokens) {
-            if (t.has_char) std::cout << t.offset << ' ' << t.length << ' ' << t.ch << '\n';
-            else std::cout << t.offset << ' ' << t.length << '\n';
-        }
-    } else if (cmd == "decompress") {
-        auto tokens = parse_tokens_from_stdin_lines();
-        std::cout << lz77_decompress(tokens) << '\n';
-    }
+    std::string text = s1 + "$" + s2 + "#";
+    int pos_dollar = (int)s1.size();
+    int pos_hash = pos_dollar + 1 + (int)s2.size();
 
+    SuffixTree st;
+    st.build(text);
+    auto ans = st.findLCSForTwoStrings(pos_dollar, pos_hash);
+
+    std::cout << ans.first << "\n";
+    for (auto &str : ans.second) std::cout << str << "\n";
     return 0;
 }
